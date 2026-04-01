@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>DocAI — Document Analysis</title>
+  <style>
+    :root {
+      --bg: #0f1117; --card: #1a1d27; --border: #2a2d3e;
+      --accent: #7c6af7; --accent2: #5cd9a6;
+      --text: #e8e8f0; --muted: #7b7d9d;
+      --danger: #f06292; --warn: #ffd54f;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: var(--bg); color: var(--text); font-family: system-ui, sans-serif; min-height: 100vh; }
+    header { padding: 24px 32px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 12px; }
+    header h1 { font-size: 22px; font-weight: 600; }
+    header span { font-size: 13px; color: var(--muted); }
+    .badge { background: var(--accent); color: #fff; padding: 2px 10px; border-radius: 99px; font-size: 12px; }
+    main { max-width: 900px; margin: 40px auto; padding: 0 24px; }
+    .upload-zone {
+      border: 2px dashed var(--border); border-radius: 16px; padding: 52px 24px;
+      text-align: center; cursor: pointer; transition: all .2s;
+      background: var(--card);
+    }
+    .upload-zone:hover, .upload-zone.drag { border-color: var(--accent); background: #1e1f35; }
+    .upload-zone .icon { font-size: 40px; margin-bottom: 12px; }
+    .upload-zone p { color: var(--muted); font-size: 15px; }
+    .upload-zone strong { color: var(--accent); }
+    #file-input { display: none; }
+    .btn {
+      background: var(--accent); color: #fff; border: none; border-radius: 10px;
+      padding: 12px 28px; font-size: 15px; font-weight: 600; cursor: pointer;
+      transition: opacity .2s; margin-top: 16px;
+    }
+    .btn:hover { opacity: .85; }
+    .btn:disabled { opacity: .4; cursor: not-allowed; }
+    .status { margin: 20px 0; padding: 14px 18px; border-radius: 10px; font-size: 14px; display: none; }
+    .status.loading { background: #1e2a3a; border: 1px solid #2d4a6e; color: #7ec8fa; display: block; }
+    .status.error { background: #2a1a1e; border: 1px solid #5a2030; color: var(--danger); display: block; }
+    .results { display: none; }
+    .results.visible { display: block; }
+    .card { background: var(--card); border: 1px solid var(--border); border-radius: 14px; padding: 24px; margin-bottom: 20px; }
+    .card h3 { font-size: 13px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin-bottom: 12px; }
+    .card p { font-size: 15px; line-height: 1.7; color: var(--text); }
+    .sentiment-badge {
+      display: inline-block; padding: 6px 18px; border-radius: 99px; font-size: 14px; font-weight: 600;
+    }
+    .sentiment-badge.positive { background: #1a3a2a; color: var(--accent2); }
+    .sentiment-badge.negative { background: #3a1a1e; color: var(--danger); }
+    .sentiment-badge.neutral  { background: #2a2a1a; color: var(--warn); }
+    .entity-list { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+    .entity-tag {
+      padding: 4px 12px; border-radius: 8px; font-size: 13px; font-weight: 500;
+    }
+    .tag-PER, .tag-PERSON { background: #261a3a; color: #b39ddb; }
+    .tag-ORG { background: #1a2a3a; color: #81d4fa; }
+    .tag-LOC, .tag-GPE { background: #1a3a2a; color: #a5d6a7; }
+    .tag-MISC, .tag-DATE, .tag-MONEY { background: #3a2a1a; color: #ffcc80; }
+    .entity-tag span.type { font-size: 10px; opacity: .7; margin-left: 4px; }
+    .score-bar { height: 6px; background: var(--border); border-radius: 3px; margin-top: 8px; }
+    .score-fill { height: 100%; border-radius: 3px; background: var(--accent2); transition: width 1s ease; }
+    .file-info { font-size: 13px; color: var(--muted); margin-top: 10px; }
+    .spinner { display: inline-block; width: 16px; height: 16px; border: 2px solid #2d4a6e; border-top-color: #7ec8fa; border-radius: 50%; animation: spin .8s linear infinite; vertical-align: middle; margin-right: 8px; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+<header>
+  <div>📄</div>
+  <div>
+    <h1>DocAI <span class="badge">Live</span></h1>
+    <span>AI-Powered Document Analysis & Extraction</span>
+  </div>
+</header>
+<main>
+  <div class="upload-zone" id="drop-zone" onclick="document.getElementById('file-input').click()">
+    <div class="icon">📁</div>
+    <p>Drop your document here or <strong>click to browse</strong></p>
+    <p style="margin-top:6px;font-size:13px">Supports PDF, DOCX, PNG, JPG, TIFF</p>
+    <input type="file" id="file-input" accept=".pdf,.docx,.doc,.png,.jpg,.jpeg,.tiff,.bmp,.webp"/>
+  </div>
+  <div id="file-info" class="file-info"></div>
+  <button class="btn" id="analyze-btn" disabled onclick="analyzeDoc()">Analyze Document</button>
+
+  <div class="status" id="status"></div>
+
+  <div class="results" id="results">
+    <div class="card">
+      <h3>📝 Summary</h3>
+      <p id="res-summary"></p>
+    </div>
+    <div class="card">
+      <h3>🏷️ Named Entities</h3>
+      <div class="entity-list" id="res-entities"></div>
+    </div>
+    <div class="card">
+      <h3>💬 Sentiment</h3>
+      <div id="res-sentiment"></div>
+      <div class="score-bar" style="margin-top:12px">
+        <div class="score-fill" id="res-score-bar" style="width:0%"></div>
+      </div>
+      <p style="font-size:12px;color:var(--muted);margin-top:6px" id="res-score-text"></p>
+    </div>
+  </div>
+</main>
+<script>
+  const API_KEY = "mysecretapikey123"; // same as your .env API_KEY
+
+  const dropZone = document.getElementById("drop-zone");
+  const fileInput = document.getElementById("file-input");
+  let selectedFile = null;
+
+  fileInput.addEventListener("change", e => {
+    setFile(e.target.files[0]);
+  });
+  dropZone.addEventListener("dragover", e => { e.preventDefault(); dropZone.classList.add("drag"); });
+  dropZone.addEventListener("dragleave", () => dropZone.classList.remove("drag"));
+  dropZone.addEventListener("drop", e => {
+    e.preventDefault(); dropZone.classList.remove("drag");
+    setFile(e.dataTransfer.files[0]);
+  });
+
+  function setFile(file) {
+    if (!file) return;
+    selectedFile = file;
+    document.getElementById("file-info").textContent = `Selected: ${file.name} (${(file.size/1024).toFixed(1)} KB)`;
+    document.getElementById("analyze-btn").disabled = false;
+    document.getElementById("results").classList.remove("visible");
+  }
+
+  async function analyzeDoc() {
+    if (!selectedFile) return;
+    const btn = document.getElementById("analyze-btn");
+    const status = document.getElementById("status");
+    btn.disabled = true;
+    status.className = "status loading";
+    status.innerHTML = '<span class="spinner"></span> Extracting text and running AI analysis...';
+    document.getElementById("results").classList.remove("visible");
+
+    const form = new FormData();
+    form.append("file", selectedFile);
+
+    try {
+      const res = await fetch("/analyze", {
+        method: "POST",
+        headers: { "Authorization": API_KEY },
+        body: form
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || "Unknown error");
+      
+      status.style.display = "none";
+      renderResults(data);
+    } catch(e) {
+      status.className = "status error";
+      status.textContent = "Error: " + e.message;
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  function renderResults(data) {
+    document.getElementById("res-summary").textContent = data.summary || "No summary generated.";
+
+    const entDiv = document.getElementById("res-entities");
+    entDiv.innerHTML = "";
+    if (data.entities && data.entities.length > 0) {
+      data.entities.forEach(e => {
+        const tag = document.createElement("span");
+        tag.className = `entity-tag tag-${e.label}`;
+        tag.innerHTML = `${e.text} <span class="type">${e.label}</span>`;
+        entDiv.appendChild(tag);
+      });
+    } else {
+      entDiv.textContent = "No entities found.";
+    }
+
+    const s = data.sentiment;
+    document.getElementById("res-sentiment").innerHTML =
+      `<span class="sentiment-badge ${s.label}">${s.label.toUpperCase()}</span>`;
+    const pct = Math.round(s.score * 100);
+    setTimeout(() => {
+      document.getElementById("res-score-bar").style.width = pct + "%";
+    }, 100);
+    document.getElementById("res-score-text").textContent = `Confidence: ${pct}%`;
+
+    document.getElementById("results").classList.add("visible");
+  }
+</script>
+</body>
+</html>
