@@ -17,6 +17,9 @@ def extract_from_docx(file_bytes: bytes) -> str:
 
 def extract_from_image(file_bytes: bytes) -> str:
     image = Image.open(io.BytesIO(file_bytes))
+    # Convert to grayscale and upscale for better OCR
+    image = image.convert('L')
+    image = image.resize((image.width * 2, image.height * 2), Image.Resampling.LANCZOS)
     return pytesseract.image_to_string(image).strip()
 
 def extract_text(file_bytes: bytes, filename: str) -> str:
