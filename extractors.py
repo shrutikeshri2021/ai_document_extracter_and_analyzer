@@ -7,16 +7,18 @@ import os
 from dotenv import load_dotenv
 load_dotenv()
 
-# Fix Tesseract path for Windows
-TESS_PATH = os.getenv("TESSERACT_PATH", r"C:\Program Files\Tesseract-OCR\tesseract.exe")
-if os.path.exists(TESS_PATH):
+# Fix Tesseract path for Windows and Linux
+TESS_PATH = os.getenv("TESSERACT_PATH", "")
+if TESS_PATH and os.path.exists(TESS_PATH):
     pytesseract.pytesseract.tesseract_cmd = TESS_PATH
 else:
-    # Try common locations
+    # Try common locations (Windows + Linux)
     for path in [
         r"C:\Program Files\Tesseract-OCR\tesseract.exe",
         r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
         r"C:\Users\Lenovo\AppData\Local\Tesseract-OCR\tesseract.exe",
+        "/usr/bin/tesseract",
+        "/usr/local/bin/tesseract",
     ]:
         if os.path.exists(path):
             pytesseract.pytesseract.tesseract_cmd = path
