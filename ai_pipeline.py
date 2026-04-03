@@ -1,292 +1,209 @@
-import os, re, requests
-from collections import Counter
-from dotenv import load_dotenv
+"""
+AI Pipeline — Master orchestrator
+LAYER 0: Groq Llama 3 70B (best quality, all 15 fields)
+LAYER 1: spaCy + YAKE + textstat (NLP fallback)
+LAYER 2: Regex patterns (always supplements)
+"""
 
+import re
+import time
+from dotenv import load_dotenv
 load_dotenv()
 
-HF_API_KEY = os.getenv("HF_API_KEY")
-HEADERS = {"Authorization": f"Bearer {HF_API_KEY}"}
+from llm_engine import analyze_with_llm
+from nlp_engine import process_text, clean_text
 
-IGNORE_WORDS = {
-    "the","a","an","and","or","but","in","on","at","to","for","of","with",
-    "by","from","is","are","was","were","be","been","have","has","had",
-    "do","does","did","will","would","could","should","may","might","must",
-    "can","still","however","moreover","this","that","these","those","it",
-    "its","not","no","so","if","as","up","we","he","she","they","our",
-    "their","my","your","his","her","##","[CLS]","[SEP]","i","you","new"
-}
 
-def hf_post(url, payload, retries=3):
-    for attempt in range(retries):
-        try:
-            r = requests.post(url, headers=HEADERS, json=payload, timeout=60)
-            if r.status_code == 503:
-                import time; time.sleep(10)
-                continue
-            r.raise_for_status()
-            return r.json()
-        except Exception as e:
-            if attempt == retries - 1:
-                raise e
-    return None
+def run_pipeline(text: str, filename: str = "document") -> dict:
+    """
+    Master pipeline. Returns all fields required by main.py.
+    Groq is tried first. If it fails or returns incomplete data,
+    NLP layer fills in the gaps. Regex always supplements.
+    """
+    start = time.time()
 
-# ─── 1. SUMMARIZATION ────────────────────────────────────────────────
-def summarize(text: str) -> str:
+    # ── Clean text first ─────────────────────────────
+    text = clean_text(text)
+    if not text or len(text) < 10:
+        return _empty_result("Text too short after cleaning")
+
+    # ── LAYER 0: Groq LLM ────────────────────────────
+    llm = {}
     try:
-        selected = text[:1500] + " " + text[-1500:] if len(text) > 3000 else text
-        url = "https://api-inference.huggingface.co/models/facebook/bart-large-cnn"
-        result = hf_post(url, {
-            "inputs": selected,
-            "parameters": {"max_length": 150, "min_length": 50, "do_sample": False}
-        })
-        if isinstance(result, list) and result:
-            return result[0].get("summary_text", "").strip()
-    except:
-        pass
-    # Fallback: first 3 sentences
+        llm = analyze_with_llm(text)
+    except Exception as e:
+        print(f"[PIPELINE] LLM error: {e}")
+
+    groq_ok = bool(llm and llm.get("summary"))
+    print(f"[PIPELINE] Groq: {'✅ success' if groq_ok else '⚠️ fallback to NLP'}")
+
+    # ── LAYER 1: NLP ─────────────────────────────────
+    nlp = {}
+    try:
+        nlp = process_text(text, filename)
+    except Exception as e:
+        print(f"[PIPELINE] NLP error: {e}")
+
+    nlp_ok = nlp.get("status") == "success"
+
+    # ── MERGE: Groq wins, NLP fills gaps ─────────────
+    duration = round(time.time() - start, 2)
+
+    # Summary: Groq first
+    summary = (llm.get("summary") or nlp.get("summary") or _fallback_summary(text))
+
+    # Entities: Merge all sources
+    seen = set()
+    all_entities = []
+    for e in (llm.get("entities") or []) + (nlp.get("entities") or []):
+        k = e.get("text", "").lower().strip()
+        if k and k not in seen and len(k) > 1:
+            seen.add(k)
+            all_entities.append(e)
+
+    # Sentiment: Groq preferred (more context-aware)
+    if llm.get("sentiment") in ("positive", "negative", "neutral"):
+        sentiment = {
+            "label": llm["sentiment"],
+            "score": float(llm.get("sentiment_score", 0.75)),
+            "explanation": llm.get("sentiment_explanation", "")
+        }
+    else:
+        sentiment = nlp.get("sentiment") or {
+            "label": "neutral", "score": 0.6, "explanation": "Could not determine sentiment"
+        }
+
+    # Keywords: Groq gives strings, NLP gives dicts — normalize both
+    raw_kw = llm.get("keywords") or []
+    nlp_kw = nlp.get("keywords") or []
+    keywords = []
+    seen_kw = set()
+    for kw in raw_kw:
+        word = kw if isinstance(kw, str) else kw.get("word", "")
+        if word and word.lower() not in seen_kw:
+            seen_kw.add(word.lower())
+            keywords.append({"word": word, "score": round(0.9 - len(keywords) * 0.05, 2)})
+    for kw in nlp_kw:
+        word = kw.get("word", "") if isinstance(kw, dict) else kw
+        if word and word.lower() not in seen_kw:
+            seen_kw.add(word.lower())
+            keywords.append(kw if isinstance(kw, dict) else {"word": word, "score": 0.5})
+    keywords = keywords[:10]
+
+    # Classification
+    cls_nlp = nlp.get("document_classification") or {}
+    doc_type = llm.get("document_type") or cls_nlp.get("category") or "General"
+    classification = {
+        "category": cls_nlp.get("category") or doc_type,
+        "document_type": doc_type,
+        "confidence": cls_nlp.get("confidence") or 0.75
+    }
+
+    # Language
+    lang_nlp = nlp.get("language") or {}
+    lang_llm = llm.get("language") or ""
+    if lang_llm:
+        language = {"language": lang_llm, "code": "en", "confidence": 0.9}
+    else:
+        language = lang_nlp if lang_nlp else {"language": "English", "code": "en", "confidence": 0.7}
+
+    # Stats
+    stats = nlp.get("document_stats") or {}
+    stats["processing_time_seconds"] = duration
+
+    # Risk
+    risk = nlp.get("risk_assessment") or {"level": "low", "reasons": [], "score": 0}
+    risk_level = risk.get("level", "low")
+
+    # Insights: Groq wins (more intelligent), NLP as backup
+    insights = llm.get("insights") or nlp.get("insights") or []
+
+    # Key phrases + topics (Groq only)
+    key_phrases = llm.get("key_phrases") or []
+    main_topics = llm.get("main_topics") or []
+    compliance_issues = llm.get("compliance_issues") or []
+    risk_reasons = llm.get("risk_reasons") or risk.get("reasons") or []
+
+    # Regex extras (emails, phones, URLs)
+    emails = re.findall(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b', text)
+    phones = re.findall(r'\b(?:\+\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b', text)
+    urls = re.findall(r'https?://[^\s<>"{}|\\^`\[\]]+', text)
+
+    # Document score
+    doc_score = nlp.get("document_score") or 70
+
+    # Sentiment distribution estimate
+    sentiment_distribution = {
+        "positive": round(sentiment["score"] if sentiment["label"] == "positive" else 1 - sentiment["score"], 2),
+        "negative": round(sentiment["score"] if sentiment["label"] == "negative" else 0.1, 2),
+        "neutral": round(0.3 if sentiment["label"] == "neutral" else 0.1, 2)
+    }
+
+    # Key sentences
     sentences = re.split(r'(?<=[.!?])\s+', text.strip())
+    key_sentences = [s.strip() for s in sentences if len(s.strip()) > 40][:5]
+
+    # Readability
+    complexity = stats.get("complexity") or "Moderate"
+    reading_time = stats.get("reading_time_minutes") or 1
+
+    return {
+        # Core fields (hackathon scoring)
+        "summary": summary,
+        "entities": all_entities[:25],
+        "sentiment": sentiment,
+
+        # Extended features
+        "keywords": keywords,
+        "key_phrases": key_phrases,
+        "main_topics": main_topics,
+        "insights": insights,
+        "document_stats": stats,
+        "classification": classification,
+        "language": language,
+        "risk_level": risk_level,
+        "risk_assessment": {
+            "level": risk_level,
+            "reasons": risk_reasons or risk.get("reasons", []),
+            "score": risk.get("score", 0)
+        },
+        "document_score": doc_score,
+        "compliance_issues": compliance_issues,
+
+        # Convenience fields
+        "emails": emails[:5],
+        "phones": phones[:5],
+        "urls": urls[:5],
+        "sentiment_distribution": sentiment_distribution,
+        "key_sentences": key_sentences,
+        "complexity": complexity,
+        "reading_time": reading_time,
+        "preview": text[:500],
+        "insight": insights[0] if insights else "Analysis complete.",
+
+        # Status
+        "ai_powered": groq_ok,
+        "llm_status": "groq_llama3" if groq_ok else "nlp_fallback",
+        "nlp_status": "spacy_active" if nlp_ok else "regex_only",
+    }
+
+
+def _fallback_summary(text: str) -> str:
+    sentences = re.split(r'(?<=[.!?])\s+', text.strip())
+    sentences = [s.strip() for s in sentences if len(s.strip()) > 20]
     return " ".join(sentences[:3]) if sentences else text[:300]
 
-# ─── 2. ENTITY EXTRACTION (FIXED) ────────────────────────────────
-def extract_entities(text: str) -> list:
-    entities = []
-    seen = set()
 
-    # Method 1: HuggingFace BERT NER
-    try:
-        url = "https://api-inference.huggingface.co/models/dslim/bert-base-NER"
-        result = hf_post(url, {"inputs": text[:1000]})
-        if isinstance(result, list):
-            current_entity = ""
-            current_label = ""
-            for item in result:
-                word = item.get("word", "").replace("##", "").strip()
-                label = item.get("entity", "")
-                score = item.get("score", 0)
-                
-                # Only take high-confidence predictions
-                if score < 0.7:
-                    continue
-                    
-                # Handle B- and I- prefixes (BIO tagging)
-                if label.startswith("B-"):
-                    if current_entity and current_entity.lower() not in IGNORE_WORDS:
-                        clean = current_entity.strip()
-                        if clean not in seen and len(clean) > 1:
-                            seen.add(clean)
-                            entities.append({"text": clean, "label": current_label})
-                    current_entity = word
-                    current_label = label[2:]  # Remove B-
-                elif label.startswith("I-") and current_entity:
-                    current_entity += " " + word
-                else:
-                    if current_entity and current_entity.lower() not in IGNORE_WORDS:
-                        clean = current_entity.strip()
-                        if clean not in seen and len(clean) > 1:
-                            seen.add(clean)
-                            entities.append({"text": clean, "label": current_label})
-                    current_entity = ""
-                    current_label = ""
-            
-            # Don't forget the last entity
-            if current_entity and current_entity.lower() not in IGNORE_WORDS:
-                clean = current_entity.strip()
-                if clean not in seen and len(clean) > 1:
-                    seen.add(clean)
-                    entities.append({"text": clean, "label": current_label})
-    except:
-        pass
-
-    # Method 2: Regex fallback (always runs to catch what BERT misses)
-    # Emails
-    emails = re.findall(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b', text)
-    for e in emails:
-        if e not in seen:
-            seen.add(e); entities.append({"text": e, "label": "EMAIL"})
-
-    # Phone numbers
-    phones = re.findall(r'\b(?:\+\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b', text)
-    for p in phones:
-        if p not in seen:
-            seen.add(p); entities.append({"text": p.strip(), "label": "PHONE"})
-
-    # Dates
-    dates = re.findall(r'\b(?:\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}|\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+\d{1,2},?\s+\d{4})\b', text)
-    for d in dates:
-        if d not in seen:
-            seen.add(d); entities.append({"text": d.strip(), "label": "DATE"})
-
-    # Money
-    money = re.findall(r'\$[\d,]+(?:\.\d{2})?|\b\d+(?:,\d{3})*(?:\.\d+)?\s*(?:million|billion|USD|EUR|INR)\b', text, re.IGNORECASE)
-    for m in money:
-        if m not in seen:
-            seen.add(m); entities.append({"text": m.strip(), "label": "MONEY"})
-
-    # Percentages
-    percents = re.findall(r'\b\d+(?:\.\d+)?%', text)
-    for p in percents:
-        if p not in seen:
-            seen.add(p); entities.append({"text": p, "label": "PERCENT"})
-
-    # URLs
-    urls = re.findall(r'https?://[^\s<>"{}|\\^`\[\]]+', text)
-    for u in urls[:3]:
-        if u not in seen:
-            seen.add(u); entities.append({"text": u, "label": "URL"})
-
-    return entities[:20]  # Return up to 20 entities
-
-# ─── 3. SENTIMENT ANALYSIS (FIXED) ───────────────────────────────────
-def analyze_sentiment(text: str) -> dict:
-    label = "neutral"
-    score = 0.5
-
-    try:
-        url = "https://api-inference.huggingface.co/models/distilbert-base-uncased-finetuned-sst-2-english"
-        result = hf_post(url, {"inputs": text[:512]})
-        
-        if isinstance(result, list) and len(result) > 0:
-            # Handle nested list [[{...}]] or flat list [{...}]
-            scores_list = result[0] if isinstance(result[0], list) else result
-            
-            if scores_list:
-                best = max(scores_list, key=lambda x: x.get("score", 0))
-                raw_label = best.get("label", "").upper()
-                score = float(best.get("score", 0.5))
-                
-                if raw_label in ["POSITIVE", "LABEL_1"]:
-                    label = "positive"
-                elif raw_label in ["NEGATIVE", "LABEL_0"]:
-                    label = "negative"
-                else:
-                    label = "neutral"
-    except:
-        pass
-
-    # Keyword boost for domain accuracy
-    text_lower = text.lower()
-    neg_words = ["breach","attack","vulnerability","malware","hack","failure","loss",
-                 "decline","risk","threat","crisis","problem","issue","error","fail",
-                 "lawsuit","penalty","fine","layoff","bankrupt","deficit"]
-    pos_words = ["growth","success","profit","award","innovation","breakthrough",
-                 "improvement","excellent","outstanding","achievement","record","gain",
-                 "expansion","positive","strong","leading","best","top","winner"]
-    
-    neg_count = sum(1 for w in neg_words if w in text_lower)
-    pos_count = sum(1 for w in pos_words if w in text_lower)
-    
-    if neg_count > pos_count + 1:
-        label = "negative"
-        score = min(score + neg_count * 0.05, 0.97)
-    elif pos_count > neg_count + 1:
-        label = "positive"
-        score = min(score + pos_count * 0.05, 0.97)
-
-    return {"label": label, "score": round(score, 2)}
-
-# ─── 4. KEYWORD EXTRACTION (NEW FEATURE) ─────────────────────────────
-def extract_keywords(text: str) -> list:
-    stop_words = IGNORE_WORDS | {
-        "also","about","after","before","between","through","during","while",
-        "than","more","most","very","just","only","even","both","each","few",
-        "other","into","over","under","again","further","then","once","here",
-        "there","when","where","why","how","all","any","both","each","more"
-    }
-    words = re.findall(r'\b[a-zA-Z][a-zA-Z]{2,}\b', text.lower())
-    filtered = [w for w in words if w not in stop_words]
-    freq = Counter(filtered)
-    return [{"word": word, "count": count} for word, count in freq.most_common(10)]
-
-# ─── 5. DOCUMENT STATISTICS (NEW FEATURE) ────────────────────────────
-def get_document_stats(text: str, filename: str) -> dict:
-    words = text.split()
-    sentences = re.split(r'[.!?]+', text)
-    sentences = [s.strip() for s in sentences if s.strip()]
-    paragraphs = [p.strip() for p in text.split('\n\n') if p.strip()]
-    word_count = len(words)
-    reading_time = max(1, round(word_count / 200))  # 200 wpm average
-    
-    ext = filename.lower().split('.')[-1]
-    doc_type_map = {
-        "pdf": "PDF Document", "docx": "Word Document", "doc": "Word Document",
-        "png": "Image (PNG)", "jpg": "Image (JPEG)", "jpeg": "Image (JPEG)",
-        "tiff": "Image (TIFF)", "bmp": "Image (BMP)", "webp": "Image (WebP)"
-    }
-    
+def _empty_result(reason: str) -> dict:
     return {
-        "word_count": word_count,
-        "sentence_count": len(sentences),
-        "paragraph_count": len(paragraphs),
-        "character_count": len(text),
-        "reading_time_minutes": reading_time,
-        "document_type": doc_type_map.get(ext, "Unknown"),
-        "avg_words_per_sentence": round(word_count / max(len(sentences), 1), 1)
-    }
-
-# ─── 6. DOCUMENT CLASSIFICATION (NEW FEATURE) ────────────────────────
-def classify_document(text: str) -> dict:
-    text_lower = text.lower()
-    
-    categories = {
-        "Legal": ["contract","agreement","clause","party","whereas","herein",
-                  "jurisdiction","liability","indemnify","shall","attorney","court"],
-        "Financial": ["revenue","profit","loss","balance","asset","liability",
-                      "investment","dividend","fiscal","quarterly","annual report","ebitda"],
-        "Medical": ["patient","diagnosis","treatment","medication","symptom","clinical",
-                    "healthcare","physician","hospital","therapy","disease","prescription"],
-        "Technology": ["software","algorithm","artificial intelligence","machine learning",
-                       "cloud","api","database","cybersecurity","digital","innovation"],
-        "Academic": ["research","methodology","hypothesis","conclusion","abstract",
-                     "literature","study","analysis","experiment","findings","journal"],
-        "News/Media": ["reported","according","journalist","article","press","statement",
-                       "announced","spokesperson","media","coverage","published"],
-        "HR/Employment": ["employee","salary","benefits","recruitment","performance",
-                          "resignation","promotion","workplace","hire","onboarding"],
-        "General": []
-    }
-    
-    scores = {}
-    for category, keywords in categories.items():
-        if keywords:
-            score = sum(1 for kw in keywords if kw in text_lower)
-            scores[category] = score
-    
-    if not scores or max(scores.values()) == 0:
-        return {"category": "General", "confidence": 0.5}
-    
-    best_category = max(scores, key=scores.get)
-    total = sum(scores.values())
-    confidence = round(scores[best_category] / total, 2) if total > 0 else 0.5
-    
-    return {"category": best_category, "confidence": min(confidence + 0.3, 0.99)}
-
-# ─── 7. LANGUAGE DETECTION (NEW FEATURE) ─────────────────────────────
-def detect_language(text: str) -> dict:
-    sample = text[:200].lower()
-    
-    lang_patterns = {
-        "Hindi": ["है","और","का","के","में","नहीं","यह","हैं"],
-        "Spanish": ["el","la","los","las","que","con","por","para","una"],
-        "French": ["le","la","les","des","que","dans","pour","avec","une"],
-        "German": ["der","die","das","und","ist","mit","von","auf","ein"],
-        "Arabic": ["في","من","على","إلى","هذا","التي","كان","أن"],
-        "English": ["the","and","is","in","of","to","that","this","with"]
-    }
-    
-    for lang, patterns in lang_patterns.items():
-        if sum(1 for p in patterns if p in sample) >= 3:
-            return {"language": lang, "confidence": 0.85}
-    
-    return {"language": "English", "confidence": 0.7}
-
-# ─── 8. MAIN PIPELINE (RETURNS ALL FEATURES) ─────────────────────────
-def run_pipeline(text: str, filename: str = "document") -> dict:
-    return {
-        "summary": summarize(text),
-        "entities": extract_entities(text),
-        "sentiment": analyze_sentiment(text),
-        "keywords": extract_keywords(text),
-        "document_stats": get_document_stats(text, filename),
-        "document_classification": classify_document(text),
-        "language": detect_language(text)
+        "summary": reason, "entities": [], "sentiment": {"label": "neutral", "score": 0.5},
+        "keywords": [], "key_phrases": [], "main_topics": [], "insights": [],
+        "document_stats": {}, "classification": {"category": "General", "confidence": 0.5},
+        "language": {"language": "English"}, "risk_level": "low",
+        "risk_assessment": {"level": "low", "reasons": []},
+        "document_score": 0, "compliance_issues": [], "emails": [], "phones": [],
+        "urls": [], "sentiment_distribution": {}, "key_sentences": [],
+        "complexity": "Unknown", "reading_time": 1, "preview": "",
+        "insight": reason, "ai_powered": False,
+        "llm_status": "error", "nlp_status": "error"
     }
