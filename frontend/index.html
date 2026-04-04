@@ -364,6 +364,18 @@ function setFile(file) {
   document.getElementById("file-selected").classList.add("show");
   document.getElementById("analyze-btn").disabled = false;
   document.getElementById("results").classList.remove("visible");
+  document.getElementById("status").style.display = "none";
+}
+
+function resetUpload() {
+  selectedFile = null;
+  fileInput.value = "";
+  document.getElementById("file-selected").classList.remove("show");
+  document.getElementById("analyze-btn").disabled = true;
+  document.getElementById("results").classList.remove("visible");
+  document.getElementById("status").style.display = "none";
+  document.getElementById("sent-bar").style.width = "0%";
+  window.scrollTo({top: 0, behavior: "smooth"});
 }
 
 async function analyzeDoc() {
@@ -371,6 +383,7 @@ async function analyzeDoc() {
   const btn = document.getElementById("analyze-btn");
   const status = document.getElementById("status");
   btn.disabled = true;
+  status.style.display = "";
   status.className = "status loading";
   status.innerHTML = '<span class="spinner"></span> Extracting text and running AI analysis — this may take 10-25 seconds...';
   document.getElementById("results").classList.remove("visible");
@@ -388,6 +401,10 @@ async function analyzeDoc() {
     if (!res.ok) throw new Error(data.detail || JSON.stringify(data));
     status.style.display = "none";
     renderResults(data);
+    btn.disabled = false;
+    btn.textContent = "⚡ Analyze Another Document";
+    // Reset file input so the same or new file can be selected again
+    fileInput.value = "";
   } catch(e) {
     status.className = "status error";
     status.textContent = "Error: " + e.message;
