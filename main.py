@@ -5,11 +5,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from dotenv import load_dotenv
+from config import API_KEY, HOST, PORT
 from extractors import extract_text
 from ai_pipeline import run_pipeline
 
 load_dotenv()
-API_KEY = os.getenv("API_KEY", "mysecretapikey123")
 
 app = FastAPI(title="DocAI - Document Analysis API", version="3.0.0")
 
