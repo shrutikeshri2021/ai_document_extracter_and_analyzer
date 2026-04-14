@@ -10,8 +10,6 @@ Built for **GUVI Hackathon 2026 — Intern Hiring Challenge**
 
 An enterprise-grade document intelligence API that automatically processes documents through a **4-layer AI pipeline** to extract meaningful insights — summaries, entities, sentiment, keywords, and 25+ structured data fields.
 
-**Live API:** `[Your deployed URL]`  
-**API Key:** `mysecretapikey123`
 
 ---
 
